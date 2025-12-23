@@ -1,80 +1,177 @@
 # identity_server.py
 import logging
 import time
-from typing import Dict, List, Optional, Set
+import json
+import hashlib
+from typing import Dict, List, Optional, Set, Any
 from flask import Flask, request, jsonify
 from did_core import DIDCore, ValidationError
 
-# 日志格式
+# 配置更清晰的日志格式
 logging.basicConfig(
     level=logging.INFO, 
-    format='%(asctime)s | \033[95m[Identity]\033[0m %(levelname)-8s | %(message)s',
+    format='%(asctime)s | \033[95m[ChainNode]\033[0m %(levelname)-8s | %(message)s',
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger("IdentityNode")
 app = Flask(__name__)
 
 # ==========================================
-# 数据存储层
+# 区块链核心组件
 # ==========================================
-class InMemoryDB:
+class Block:
+    def __init__(self, index: int, transactions: List[Dict], timestamp: int, previous_hash: str):
+        self.index = index
+        self.transactions = transactions
+        self.timestamp = timestamp
+        self.previous_hash = previous_hash
+        self.nonce = 0
+        self.hash = self.compute_hash()
+
+    def compute_hash(self) -> str:
+        """计算区块哈希：SHA256(index + prev_hash + txs + timestamp + nonce)"""
+        block_string = json.dumps({
+            "index": self.index,
+            "timestamp": self.timestamp,
+            "previous_hash": self.previous_hash,
+            "transactions": self.transactions,
+            "nonce": self.nonce
+        }, sort_keys=True)
+        return hashlib.sha256(block_string.encode()).hexdigest()
+
+class BlockchainDB:
+    """
+    模拟区块链数据库。
+    数据写入 -> 生成事项 -> 打包区块 -> 更新状态(State)
+    数据读取 -> 直接读取状态(State)
+    """
     def __init__(self):
-        # 存储结构: { did: {"hash": doc_hash, "reg_time": timestamp} }
-        self._anchors: Dict[str, Dict] = {} 
-        self._revocation_bitmap: List[int] = [0] * 10240
-        self._blacklist: Set[str] = set()
-        # 统计信息
-        self.stats = {"total_dids": 0, "total_vcs": 0, "total_bans": 0}
+        # 1. 链式账本
+        self.chain: List[Block] = []
+        self.pending_transactions: List[Dict] = []
+        
+        # 2. 状态
+        self.state = {
+            "anchors": {},      # { did: {"hash": ..., "reg_time": ...} }
+            "revocation": [0] * 10240, # 位图
+            "blacklist": set(), # 黑名单
+            "stats": {"total_dids": 0, "total_vcs": 0, "total_bans": 0}
+        }
+        
+        # 初始化创世区块
+        self.create_genesis_block()
 
+    def create_genesis_block(self):
+        genesis_tx = [{"type": "GENESIS", "payload": "Identity Chain Launched"}]
+        genesis_block = Block(0, genesis_tx, int(time.time()), "0"*64)
+        self.chain.append(genesis_block)
+        logger.info(f"创世区块已生成 | Hash: {genesis_block.hash[:16]}...")
+
+    def _add_transaction(self, tx_type: str, **kwargs):
+        """提交事项到缓冲池"""
+        tx = {"type": tx_type, "timestamp": int(time.time()), **kwargs}
+        self.pending_transactions.append(tx)
+        # 模拟：每笔交易立即出块 (Instant Mine)
+        self.handle_block()
+
+    def handle_block(self):
+        """打包交易，生成新块，更新状态"""
+        if not self.pending_transactions:
+            return
+
+        last_block = self.chain[-1]
+        new_block = Block(
+            index=len(self.chain),
+            transactions=self.pending_transactions,
+            timestamp=int(time.time()),
+            previous_hash=last_block.hash
+        )
+        
+        # 简单工作量证明 (可选，此处略过直接上链)
+        self.chain.append(new_block)
+        
+        # *** 关键：执行状态转换 (State Transition) ***
+        self._update_state(self.pending_transactions)
+        
+        logger.info(f"⛏️  新区块 #{new_block.index} 上链 | Txs: {len(new_block.transactions)} | Prev: {new_block.previous_hash[:8]}")
+        self.pending_transactions = [] # 清空缓冲池
+
+    def _update_state(self, transactions):
+        """更新内存字典"""
+        for tx in transactions:
+            t_type = tx['type']
+            
+            if t_type == "REGISTER_DID":
+                did, doc_hash = tx['did'], tx['doc_hash']
+                if did not in self.state["anchors"]:
+                    self.state["stats"]["total_dids"] += 1
+                self.state["anchors"][did] = {"hash": doc_hash, "reg_time": tx['timestamp']}
+                
+            elif t_type == "ISSUE_VC":
+                self.state["stats"]["total_vcs"] += 1
+                
+            elif t_type == "REVOKE_VC":
+                idx = tx['idx']
+                if 0 <= idx < len(self.state["revocation"]):
+                    self.state["revocation"][idx] = 1
+                    
+            elif t_type == "BAN_DID":
+                if tx['did'] not in self.state["blacklist"]:
+                    self.state["blacklist"].add(tx['did'])
+                    self.state["stats"]["total_bans"] += 1
+                    
+            elif t_type == "UNBAN_DID":
+                if tx['did'] in self.state["blacklist"]:
+                    self.state["blacklist"].remove(tx['did'])
+                    self.state["stats"]["total_bans"] -= 1
+
+    # ==========================
+    # 接口方法
+    # ==========================
+    
     def save_anchor(self, did: str, doc_hash: str):
-        if did not in self._anchors:
-            self.stats["total_dids"] += 1
-        self._anchors[did] = {"hash": doc_hash, "reg_time": int(time.time())}
+        self._add_transaction("REGISTER_DID", did=did, doc_hash=doc_hash)
 
+    def set_revoked(self, index: int):
+        self._add_transaction("REVOKE_VC", idx=index)
+
+    def allocate_index(self) -> int:
+        # 分配索引同时也记录一次发证
+        idx = int(time.time() * 1000) % len(self.state["revocation"])
+        self._add_transaction("ISSUE_VC", idx=idx)
+        return idx
+
+    def add_to_blacklist(self, did: str):
+        self._add_transaction("BAN_DID", did=did)
+
+    def remove_from_blacklist(self, did: str):
+        self._add_transaction("UNBAN_DID", did=did)
+
+    # [Read] 所有的读操作读取 self.state
     def get_anchor(self, did: str) -> Optional[str]:
-        data = self._anchors.get(did)
+        data = self.state["anchors"].get(did)
         return data["hash"] if data else None
 
     def get_all_dids(self):
         results = []
-        for did, info in self._anchors.items():
-            status = "banned" if did in self._blacklist else "active"
+        for did, info in self.state["anchors"].items():
+            status = "banned" if did in self.state["blacklist"] else "active"
             results.append({"did": did, "status": status, "reg_time": info["reg_time"]})
         return results
 
-    def set_revoked(self, index: int):
-        if 0 <= index < len(self._revocation_bitmap):
-            self._revocation_bitmap[index] = 1
-
     def is_revoked(self, index: int) -> bool:
-        if 0 <= index < len(self._revocation_bitmap):
-            return self._revocation_bitmap[index] == 1
-        return True # 越界默认视为撤销，安全优先
+        if 0 <= index < len(self.state["revocation"]):
+            return self.state["revocation"][index] == 1
+        return True
 
-    def allocate_index(self) -> int:
-        self.stats["total_vcs"] += 1
-        return int(time.time() * 1000) % len(self._revocation_bitmap)
-
-    def add_to_blacklist(self, did: str):
-        if did not in self._blacklist:
-            self._blacklist.add(did)
-            self.stats["total_bans"] += 1
-            logger.warning(f"DID [{did}] 已加入黑名单")
-
-    def remove_from_blacklist(self, did: str):
-        if did in self._blacklist:
-            self._blacklist.remove(did)
-            self.stats["total_bans"] -= 1
-            logger.info(f"DID [{did}] 已从黑名单移除")
-            
     def is_blacklisted(self, did: str) -> bool:
-        return did in self._blacklist
+        return did in self.state["blacklist"]
 
 # ==========================================
 # 业务逻辑层
 # ==========================================
 class IdentityAuthority:
-    def __init__(self, db: InMemoryDB):
+    def __init__(self, db: BlockchainDB):
         self.db = db
         try:
             self.priv_key, self.pub_key = DIDCore.generate_keys()
@@ -96,18 +193,16 @@ class IdentityAuthority:
             raise ValidationError(f"DID格式错误: {did}")
         
         self.db.save_anchor(did, doc_hash)
-        logger.info(f"注册新锚点 -> {did[:20]}...")
+        logger.info(f"注册请求已提交上链 -> {did[:20]}...")
         return True
 
     def issue_credential(self, subject_did: str, claims: Dict) -> Dict:
         if not subject_did: raise ValidationError("申请人 DID 不能为空")
         
-        # 检查黑名单
         if self.db.is_blacklisted(subject_did):
             logger.warning(f"拒绝为黑名单用户发证: {subject_did}")
             raise ValidationError("DID已被列入黑名单，禁止申请凭证")
         
-        # 检查注册状态
         if not self.db.get_anchor(subject_did):
             raise ValidationError(f"DID {subject_did} 未在链上注册")
 
@@ -117,7 +212,6 @@ class IdentityAuthority:
             "claims": claims, "revocation_idx": rev_idx
         }
         
-        # 签名
         try:
             sig = DIDCore.sign(self.priv_key, vc_payload)
         except Exception as e:
@@ -128,41 +222,31 @@ class IdentityAuthority:
 
     def handle_anomaly(self, did: str, reason: str, rev_idx: Optional[int] = None):
         if not did: return
-        logger.warning(f"\033[91m收到异常上报 -> 拉黑: {did} | 原因: {reason}\033[0m")
+        logger.warning(f"\033[91m收到异常上报 -> 交易生成: 拉黑 {did}\033[0m")
         self.db.add_to_blacklist(did)
         if rev_idx is not None:
             self.db.set_revoked(rev_idx)
-            logger.info(f"关联证书 Index [{rev_idx}] 已撤销")
 
     def recover_anomaly(self, did: str):
         if not did: return False
         if self.db.is_blacklisted(did):
-            logger.info(f"收到恢复请求 -> 解封: {did}")
+            logger.info(f"收到恢复请求 -> 交易生成: 解封 {did}")
             self.db.remove_from_blacklist(did)
             return True
         return False
-    
+
     def check_vc_status(self, subject_did: str, rev_idx: int) -> Dict:
-        """
-        [新增功能] 综合查询 VC 是否有效
-        检查项：DID是否存在 + 是否被黑名单封禁 + 证书是否被撤销
-        """
-        # 1. 检查 DID 注册状态
+        # 读操作，直接查 State，速度极快
         if not self.db.get_anchor(subject_did):
              return {"valid": False, "reason": "DID Not Registered", "status_code": 1001}
-             
-        # 2. 检查黑名单 (Global Ban)
         if self.db.is_blacklisted(subject_did):
             return {"valid": False, "reason": "Subject DID is Banned", "status_code": 1002}
-            
-        # 3. 检查撤销状态 (Specific Revocation)
         if self.db.is_revoked(rev_idx):
             return {"valid": False, "reason": "Credential Revoked", "status_code": 1003}
-            
         return {"valid": True, "reason": "Valid", "status_code": 0}
 
 # 单例
-db_instance = InMemoryDB()
+db_instance = BlockchainDB()
 authority = IdentityAuthority(db_instance)
 
 # ==========================================
@@ -172,7 +256,6 @@ def response_wrapper(data=None, msg="Success", code=200, success=True):
     return jsonify({"success": success, "message": msg, "data": data}), code
 
 def validate_json_params(required_fields: List[str]):
-    """校验 JSON 参数是否存在"""
     if not request.json:
         raise ValidationError("Request body must be JSON")
     for field in required_fields:
@@ -183,6 +266,22 @@ def validate_json_params(required_fields: List[str]):
 # ==========================================
 # 接口定义
 # ==========================================
+
+@app.route('/chain/blocks', methods=['GET'])
+def get_chain_blocks():
+    """返回完整的区块链数据，用于可视化"""
+    chain_data = [
+        {
+            "index": b.index,
+            "hash": b.hash,
+            "previous_hash": b.previous_hash,
+            "timestamp": b.timestamp,
+            "transactions": b.transactions
+        } 
+        for b in db_instance.chain
+    ]
+    return response_wrapper(data=chain_data)
+
 @app.route('/chain/anchor/<did>', methods=['GET'])
 def query_anchor(did):
     hash_val = db_instance.get_anchor(did)
@@ -262,6 +361,8 @@ def recover_api():
 if __name__ == '__main__':
     print("\n" + "="*60)
     print("   Identity Server Running on Port 5000")
+    print("   [Feature] Simulated Blockchain Ledger (Linked Hash)")
+    print("   [Feature] Tamper-Evident Transaction Log")
     print("   [功能] DID注册 | VC签发 | 黑名单管理 | 异常处理")
     print("="*60 + "\n")
     app.run(port=5000, debug=False)

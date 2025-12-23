@@ -123,7 +123,6 @@ class DIDCore:
     分布式数字身份(DID)核心工具类。
     提供密钥生成、哈希计算、DID 标识符生成、Canonicalize 以及 SM2 签名验签功能。
     """
-
     DID_PREFIX = "did:lab:IoT"
 
     @staticmethod
@@ -263,7 +262,7 @@ class DIDCore:
             logger.warning(f"验签过程发生异常: {str(e)}")
             return False
 # =========================================================================
-#  简单测试代码
+#  测试代码
 # =========================================================================
 if __name__ == "__main__":
     print("Testing Real SM2 Key Generation...")

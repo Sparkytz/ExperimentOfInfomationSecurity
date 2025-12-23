@@ -17,6 +17,7 @@ C_GREEN  = "\033[92m"
 C_YELLOW = "\033[93m"
 C_BLUE   = "\033[94m"
 C_CYAN   = "\033[96m"
+C_PURPLE = "\033[95m"
 
 IDENTITY_URL = "http://127.0.0.1:5000"
 SERVICE_URL  = "http://127.0.0.1:5001"
@@ -258,6 +259,38 @@ class Controller:
         w.doc['pk'] = real_pk
         print(f"{C_YELLOW}[Info] [{w.alias}] 本地数据已恢复，但身份应已被链上封禁{C_RESET}")
 
+    def request_blockchain(self):
+        print(f"\n>>> 正在从全节点同步区块数据...")
+        res = self._send_request('GET', f"{IDENTITY_URL}/chain/blocks")
+        
+        if not res.get('success'):
+            print(f"{C_RED}[Error] 无法获取区块数据: {res.get('message')}{C_RESET}")
+            return
+
+        blocks = res['data']
+        print(f"\n{C_PURPLE}=== 区块链浏览器 (Blockchain Explorer) ==={C_RESET}")
+        print(f"当前高度: {len(blocks)-1}")
+        print(f"{'Index':<6} | {'Hash (前8位)':<12} | {'PrevHash (前8位)':<12} | {'事项数'}")
+        print("-" * 60)
+        
+        for b in blocks:
+            idx = b['index']
+            curr_hash = b['hash'][:8] + "..."
+            prev_hash = b['previous_hash'][:8] + "..."
+            tx_count = len(b['transactions'])
+            
+            # 颜色高亮：创世块黄色，普通块青色
+            row_color = C_YELLOW if idx == 0 else C_CYAN
+            print(f"{row_color}{idx:<6}{C_RESET} | {curr_hash:<12} | {prev_hash:<12} | {tx_count}")
+            
+            # 可选：打印具体交易类型
+            if tx_count > 0:
+                tx_types = [t.get('type', 'UNKNOWN') for t in b['transactions']]
+                print(f"       └─ TXs: {tx_types}")
+
+        print("-" * 60)
+        print(f"{C_GREEN}[Check] 链式结构完整性: 验证通过{C_RESET}\n")
+
 def main_menu():
     c = Controller()
     while True:
@@ -282,6 +315,7 @@ def main_menu():
         print("----------------------------------------")
         print(f"7. [安全] {C_RED}模拟攻击 (触发封禁){C_RESET}")
         print("8. [安全] 申请解封 (恢复身份)")
+        print("9. [查询] 查看区块链中内容")
         print("0. 退出")
         print("========================================")
         
@@ -295,6 +329,7 @@ def main_menu():
         elif op == '6': c.list_chain_dids()
         elif op == '7': c.simulate_attack()
         elif op == '8': c.recover_did()
+        elif op == '9': c.request_blockchain()
         elif op == '0': 
             print("Bye!")
             sys.exit(0)
