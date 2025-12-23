@@ -173,6 +173,6 @@ def access_api():
 if __name__ == '__main__':
     print("\n" + "="*60)
     print("   Service Server Running on Port 5001")
-    print("   [功能] 门禁控制 | 异常上报 | 远程身份查验")
+    print("   [功能] 验证控制 | 异常上报 | 远程身份查验")
     print("="*60 + "\n")
     app.run(port=5001, debug=False)
